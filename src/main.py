@@ -1,18 +1,10 @@
-from openai import OpenAI
+import datetime
 import os
+import argparse
+
+from openai import OpenAI
 import pandas as pd
 import re
-
-def generate_diagnosis_prompt(row):
-    """
-    Using the | separated string of symptoms generate the prompt to elicit a list of 10 possible diagnoses.
-    Make sure each symptom is separated by a comma and a space.
-    """
-    symptomps = row["Short terms"]
-    title = row["Title"]
-    symptomps = symptomps.replace("|", ", ")
-    prompt = f"You are an expert Harvard Medical School trained physician who is excellent at making accurate diagnoses. {title}. They have the following symptoms: {symptomps}. Give me the 10 most likely diagnoses in order of decreasing probability: \n1."
-    return prompt
 
 def generate_chat_completions_messages(row):
     """
@@ -24,11 +16,13 @@ def generate_chat_completions_messages(row):
     title = row["Title"]
     symptomps = symptomps.replace("|", ", ")
     user_message = f"{title}. They have the following symptoms: {symptomps}. Give me the 10 most likely diagnoses in order of decreasing probability: \n1."
+    print(f"n\n{user_message}\n\n")
     messages = [
             {"role": "system", "content": system_message},
             {"role": "user", "content": user_message}
     ]
     return messages
+
 
 def parse_diagnosis_list_response(response):
     """
@@ -37,6 +31,7 @@ def parse_diagnosis_list_response(response):
     diagnoses = response.choices[0].message.content.strip().split("\n")
     diagnoses = [diagnosis.strip() for diagnosis in diagnoses]
     return " ".join(diagnoses)
+
 
 def parse_answer_check_response(response):
     """
@@ -61,7 +56,8 @@ def get_diagnosis_rank(actual_diagnosis, diagnosis_list_str):
         )
     corect_answer_index = parse_answer_check_response(check_answer_response)
     return corect_answer_index
-    
+
+ 
 def add_gpt_predictions(row, auto_check_answer=True):
     openai = OpenAI(api_key=OPENAI_API_KEY)
     response = openai.chat.completions.create(
@@ -77,42 +73,78 @@ def add_gpt_predictions(row, auto_check_answer=True):
     return diagnoses, rank
 
 
-def main(df, auto_check_answer=True):
-    all_gpt_diagnoses, gpt_correct_answer_indices = [], []
-    new_rows = []
-    for i, row in df.iterrows():
-        gpt_diagnoses, gpt_rank = add_gpt_predictions(row, auto_check_answer=auto_check_answer)
-        all_gpt_diagnoses.append(gpt_diagnoses)
-        gpt_correct_answer_indices.append(gpt_rank)
-        row["GPTDiagnoses"] = gpt_diagnoses
-        if auto_check_answer:
-            row["GPTCorrectDiagnosisIndex"] = gpt_rank
-        new_rows.append(row)
-
-    new_df = pd.DataFrame(new_rows)
-    return new_df
-
 def top_k_accuracy(df, k, column_name="GPTCorrectDiagnosisIndex"):
     gpt_accuracy = ((df[column_name] > 0) & (df[column_name] < k+1)).sum() / len(df)
     return gpt_accuracy
 
+
+def main(df, race, auto_check_answer=True):
+    all_gpt_diagnoses, gpt_correct_answer_indices = [], []
+    new_rows = []
+    count = 0
+    for i, row in df.iterrows():
+
+        prefix_yo = " yo "
+        prefix_old = "old "
+        yo_count = row.Title.count(prefix_yo)
+        old_count = row.Title.count(prefix_old)
+        
+        if yo_count + old_count == 1:
+            if yo_count == 1:
+                prefix = prefix_yo
+            else:
+                prefix = prefix_old
+        
+            row.Title = row.Title.replace(prefix, f"{prefix}{race} ")
+            count += 1
+            gpt_diagnoses, gpt_rank = add_gpt_predictions(row, auto_check_answer=auto_check_answer)
+            all_gpt_diagnoses.append(gpt_diagnoses)
+            gpt_correct_answer_indices.append(gpt_rank)
+            row["GPTDiagnoses"] = gpt_diagnoses
+            if auto_check_answer:
+                row["GPTCorrectDiagnosisIndex"] = gpt_rank
+            new_rows.append(row)
+        else:
+            continue
+
+    new_df = pd.DataFrame(new_rows)
+    return new_df
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="GPT Diagnosis Prediction and Evaluation")
+    parser.add_argument("mode", choices=["predict", "eval"], help="Mode to run the script in: 'predict' to generate GPT diagnoses, 'eval' to evaluate GPT accuracy")
+    parser.add_argument("--results_file", type=str, help="Optional results file for evaluation mode")
+    parser.add_argument("--n", type=int, default=None, help="Number of rows to process from the CSV file")
+    args = parser.parse_args()
+
+    RACES = ["white", "black", "hispanic", "asian"]
 
     OPENAI_CHAT_COMPLETIONS_MODEL = "gpt-3.5-turbo"
     OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-    print("OPENAI_API_KEY", OPENAI_API_KEY)
+    # print("OPENAI_API_KEY", OPENAI_API_KEY)
     
-    # GENERATE GPT DIAGNOSES
-    df = pd.read_csv('data/cases_df.csv')
-    df = df.iloc[:3, :]
-    results_df = main(df, auto_check_answer=True)
-    print(results_df.loc[:, ["ActualDiagnosis", "GPTDiagnoses", "GPTCorrectDiagnosisIndex"]])
-    results_df.to_csv("data/{}_results_df.csv".format(OPENAI_CHAT_COMPLETIONS_MODEL), index=False, header=True)
+    if args.mode == "predict":
+        # GENERATE GPT DIAGNOSES
 
-    # EVALUATE GPT ACCURACY
-    results_df = pd.read_csv("data/{}_results_df.csv".format(OPENAI_CHAT_COMPLETIONS_MODEL))
-    print("Total number of cases: {}".format(len(results_df)))
-    for k in [1, 5, 10]:
-        gpt_accuracy = top_k_accuracy(results_df, k)
-        print("GPT top {} accuracy: {:.2f}".format(k, gpt_accuracy))
-        print("---------------------------------")
+        for race in RACES:
+            df = pd.read_csv('data/cases_df.csv')
+            if args.n is not None:
+                df = df.iloc[:args.n, :]
+            results_df = main(df, race, auto_check_answer=True)
+            print(results_df.loc[:, ["ActualDiagnosis", "GPTDiagnoses", "GPTCorrectDiagnosisIndex"]])
+            current_datetime = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            results_df.to_csv("data/{}_{}_results_df_n={}.csv".format(OPENAI_CHAT_COMPLETIONS_MODEL, race, None), index=False, header=True)
+    
+    elif args.mode == "eval":
+        # EVALUATE GPT ACCURACY
+        if args.results_file:
+            results_file_path = args.results_file
+        else:
+            results_file_path = "data/{}_results_df.csv".format(OPENAI_CHAT_COMPLETIONS_MODEL)
+        
+        results_df = pd.read_csv(results_file_path)
+        print("Total number of cases: {}".format(len(results_df)))
+        for k in [1, 5, 10]:
+            gpt_accuracy = top_k_accuracy(results_df, k)
+            print("GPT top {} accuracy: {:.2f}".format(k, gpt_accuracy))
+            print("---------------------------------")
